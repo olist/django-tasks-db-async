@@ -93,6 +93,7 @@ dependency-groups = ["dev"]
 
 [tool.hatch.envs.hatch-test]
 extra-dependencies = [
+  "opentelemetry-sdk",
   "pytest-django",
 ]
 

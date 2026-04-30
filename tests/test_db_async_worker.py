@@ -1,11 +1,12 @@
 import asyncio
 import itertools
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from typing import Any
 from unittest import mock
 
 import pytest
 from asgiref.sync import async_to_sync
+from django.dispatch import Signal
 from django.test import override_settings
 from django_tasks_db.models import DBTaskResult
 from opentelemetry import trace
@@ -13,7 +14,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from django_tasks_db_async._compat import TaskResultStatus, task, task_finished
+from django_tasks_db_async._compat import TaskResultStatus, task, task_finished, task_started
 from django_tasks_db_async.management.commands.db_async_worker import Command, Worker
 
 pytestmark = pytest.mark.django_db
@@ -198,6 +199,25 @@ class TestWorker:
         mock_sleep.assert_awaited_once()
 
     @pytest.fixture
+    def signal_collector(self) -> Generator[Callable[[Signal], list], Any]:
+        connected: list[tuple[Signal, Any]] = []
+
+        def collect(signal: Signal) -> list:
+            received: list = []
+
+            def receiver(sender: object, **kwargs: object) -> None:
+                received.append({"sender": sender, **kwargs})
+
+            signal.connect(receiver, weak=False)
+            connected.append((signal, receiver))
+            return received
+
+        yield collect
+
+        for signal, receiver in connected:
+            signal.disconnect(receiver)
+
+    @pytest.fixture
     def span_exporter(self) -> Generator[InMemorySpanExporter, Any]:
         exporter = InMemorySpanExporter()
         provider = TracerProvider()
@@ -213,18 +233,21 @@ class TestWorker:
     def test_run_task_successful_task_marks_as_successful_stores_return_value_and_sends_signal(
         self,
         span_exporter: InMemorySpanExporter,
+        signal_collector: Callable[[Signal], list],
     ) -> None:
         """Test if run_task marks as SUCCESSFUL, stores the return value, sends signal and records a span."""
+        started = signal_collector(task_started)
+        finished = signal_collector(task_finished)
         worker = Worker("w-00", "default", interval=0)
         db_task_result = DBTaskResult.objects.get(id=_noop_task.enqueue().id)
         db_task_result.claim(worker.worker_id)
-        with mock.patch.object(task_finished, "asend") as mock_signal:
-            async_to_sync(worker.run_task)(db_task_result)
+        async_to_sync(worker.run_task)(db_task_result)
         db_task_result.refresh_from_db()
         assert db_task_result.status == TaskResultStatus.SUCCESSFUL
         assert db_task_result.return_value == "ok"
         assert worker._tasks_run == 1  # noqa: SLF001
-        mock_signal.assert_awaited_once()
+        assert len(started) == 1
+        assert len(finished) == 1
         [span] = span_exporter.get_finished_spans()
         expected_operation_name = f"{_noop_task.func.__module__}.{_noop_task.func.__qualname__}"
         assert span.name == "default process"
@@ -239,32 +262,40 @@ class TestWorker:
     def test_run_task_failed_task_marks_as_failed_records_exception_and_sends_signal(
         self,
         span_exporter: InMemorySpanExporter,
+        signal_collector: Callable[[Signal], list],
     ) -> None:
         """Test if run_task marks as FAILED, sends task_finished, records exception and sets span to ERROR."""
+        started = signal_collector(task_started)
+        finished = signal_collector(task_finished)
         worker = Worker("w-00", "default", interval=0)
         db_task_result = DBTaskResult.objects.get(id=_failing_task.enqueue().id)
         db_task_result.claim(worker.worker_id)
-        with mock.patch.object(task_finished, "asend") as mock_signal:
-            async_to_sync(worker.run_task)(db_task_result)
+        async_to_sync(worker.run_task)(db_task_result)
         db_task_result.refresh_from_db()
         assert db_task_result.status == TaskResultStatus.FAILED
         assert worker._tasks_run == 1  # noqa: SLF001
-        mock_signal.assert_awaited_once()
+        assert len(started) == 1
+        assert len(finished) == 1
         [span] = span_exporter.get_finished_spans()
         assert span.status.status_code == trace.StatusCode.ERROR
         assert len(span.events) == 1
         assert span.events[0].name == "exception"
         assert span.events[0].attributes["exception.type"] == "ValueError"
 
-    def test_run_task_task_path_not_importable_does_not_send_signal(self) -> None:
-        """Test if run_task does not send task_finished when task_path is not importable."""
+    def test_run_task_task_path_not_importable_does_not_send_signal(
+        self,
+        signal_collector: Callable[[Signal], list],
+    ) -> None:
+        """Test if run_task does not send task_started or task_finished when task_path is not importable."""
+        started = signal_collector(task_started)
+        finished = signal_collector(task_finished)
         worker = Worker("w-00", "default", interval=0)
         db_task_result = DBTaskResult.objects.get(id=_noop_task.enqueue().id)
         db_task_result.task_path = "nonexistent.module.deleted_function"
         db_task_result.claim(worker.worker_id)
-        with mock.patch.object(task_finished, "asend") as mock_signal:
-            async_to_sync(worker.run_task)(db_task_result)
-        mock_signal.assert_not_awaited()
+        async_to_sync(worker.run_task)(db_task_result)
+        assert not started
+        assert not finished
 
 
 class TestCommand:
