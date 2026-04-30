@@ -32,6 +32,7 @@ from django_tasks_db_async._compat import (
     DEFAULT_TASK_BACKEND_ALIAS,
     DEFAULT_TASK_QUEUE_NAME,
     TaskContext,
+    dispatch_signal,
     task_finished,
     task_started,
 )
@@ -131,7 +132,7 @@ class Worker:
                     db_task_result.queue_name,
                     task_func_name,
                 )
-                await task_started.asend(sender=backend_type, task_result=task_result)
+                await dispatch_signal(task_started, backend_type, task_result=task_result)
                 if task.takes_context:
                     return_value = await task.acall(
                         TaskContext(task_result=task_result),
@@ -144,7 +145,7 @@ class Worker:
                 # Setting the return and success value inside the error handling,
                 # So errors setting it (eg JSON encode) can still be recorded
                 await sync_to_async(db_task_result.set_successful)(return_value)
-                await task_finished.asend(sender=backend_type, task_result=db_task_result.task_result)
+                await dispatch_signal(task_finished, backend_type, task_result=db_task_result.task_result)
                 duration = (db_task_result.finished_at - db_task_result.started_at).total_seconds()
                 logger.info(
                     "Task complete worker_id=%r task_id=%r queue=%r task=%r duration=%r",
@@ -173,7 +174,7 @@ class Worker:
                 except (ImportError, SuspiciousOperation):
                     pass
                 else:
-                    await task_finished.asend(sender=backend_type, task_result=task_result)
+                    await dispatch_signal(task_finished, backend_type, task_result=task_result)
             finally:
                 self._tasks_run += 1
 
