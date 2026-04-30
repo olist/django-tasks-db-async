@@ -206,6 +206,7 @@ select = [
   "RUF",
   "TRY"
 ]
+ignore = ["COM812"]
 
 [tool.ruff.lint.extend-per-file-ignores]
 "tests/*" = ["S101", "D"]
