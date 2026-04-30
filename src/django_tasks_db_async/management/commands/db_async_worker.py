@@ -42,6 +42,7 @@ class Worker:
     """Async worker that polls queues, claims tasks atomically, and executes them."""
 
     def __init__(self, worker_id: str, backend_name: str, interval: float) -> None:
+        """Initialize the worker with a unique ID, target backend, and polling interval."""
         self.worker_id = worker_id
         self.backend_name = backend_name
         self.interval = interval
