@@ -1,0 +1,219 @@
+[project]
+name = "django-tasks-db-async"
+description = "Async worker for django-tasks-db with OpenTelemetry instrumentation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Christian Hartung", email = "christian.hartung@olist.com" },
+]
+keywords = []
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: Django",
+  "Framework :: Django :: 4.2",
+  "Framework :: Django :: 5.0",
+  "Framework :: Django :: 5.1",
+  "Framework :: Django :: 5.2",
+  "Framework :: Django :: 6.0",
+  "Intended Audience :: Developers",
+  "Natural Language :: English",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+  "Typing :: Typed",
+]
+dependencies = [
+  "asgiref",
+  "django-tasks-db",
+  "opentelemetry-api",
+]
+dynamic = ["version"]
+
+[project.urls]
+Documentation = "https://github.com/olist/django-tasks-db-async#readme"
+Issues = "https://github.com/olist/django-tasks-db-async/issues"
+Source = "https://github.com/olist/django-tasks-db-async"
+
+[dependency-groups]
+dev = [
+  "deptry",
+  "django-stubs (>=4.2)",
+  "mypy",
+  "opentelemetry-sdk",
+  "pre-commit",
+  "pytest",
+  "pytest-cov",
+  "pytest-django",
+]
+
+[build-system]
+requires = ["hatch-vcs", "hatchling"]
+build-backend = "hatchling.build"
+
+[tool.coverage.run]
+source_pkgs = ["django_tasks_db_async", "tests"]
+branch = true
+parallel = true
+
+[tool.coverage.paths]
+django_tasks_db_async = [
+  "src/django_tasks_db_async",
+  "*/django-tasks-db-async/src/django_tasks_db_async"
+]
+tests = ["tests", "*/django-tasks-db-async/tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
+
+[tool.deptry]
+known_first_party = ["django_tasks_db_async"]
+
+[tool.django-stubs]
+django_settings_module = "tests.settings"
+
+[tool.hatch.build.targets.wheel]
+sources = ["src"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/.github"]
+
+[tool.hatch.envs.default]
+dependency-groups = ["dev"]
+
+[tool.hatch.envs.hatch-test]
+extra-dependencies = [
+  "pytest-django",
+]
+
+[[tool.hatch.envs.hatch-test.matrix]]
+django = ["4.2"]
+python = ["3.10", "3.11", "3.12", "3.13"]
+
+[[tool.hatch.envs.hatch-test.matrix]]
+django = ["5.0", "5.1"]
+python = ["3.10", "3.11", "3.12"]
+
+[[tool.hatch.envs.hatch-test.matrix]]
+django = ["5.2"]
+python = ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+[[tool.hatch.envs.hatch-test.matrix]]
+django = ["6.0"]
+python = ["3.12", "3.13", "3.14"]
+
+[tool.hatch.envs.hatch-test.overrides]
+matrix.django.dependencies = [
+  { value = "django==4.2.*", if = ["4.2"] },
+  { value = "django==5.0.*", if = ["5.0"] },
+  { value = "django==5.1.*", if = ["5.1"] },
+  { value = "django==5.2.*", if = ["5.2"] },
+  { value = "django==6.0.*", if = ["6.0"] },
+]
+
+[tool.hatch.envs.hatch-static-analysis]
+skip-install = false
+config-path = "none"
+dependencies = ["ruff"]
+
+[tool.hatch.envs.types]
+extra-dependencies = [
+  "mypy>=1.0.0",
+]
+
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args:src/django_tasks_db_async tests}"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.mypy]
+plugins = ["mypy_django_plugin.main"]
+
+[tool.pytest]
+pythonpath = [".", "src"]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+  "ERA",
+  "YTT",
+  "ANN",
+  "ASYNC",
+  "S",
+  "BLE",
+  "FBT",
+  "B",
+  "A",
+  "COM",
+  "C4",
+  "DTZ",
+  "T10",
+  "DJ",
+  "EM",
+  "EXE",
+  "FIX",
+  "FA",
+  "INT",
+  "ISC",
+  "ICN",
+  "LOG",
+  "G",
+  "INP",
+  "PIE",
+  "T20",
+  "PT",
+  "Q",
+  "RSE",
+  "RET",
+  "SLF",
+  "SIM",
+  "SLOT",
+  "TID",
+  "TD",
+  "TC",
+  "ARG",
+  "PTH",
+  "FLY",
+  "I",
+  "C90",
+  "N",
+  "PERF",
+  "E",
+  "W",
+  "D",
+  "F",
+  "PGH",
+  "PL",
+  "UP",
+  "FURB",
+  "RUF",
+  "TRY"
+]
+
+[tool.ruff.lint.extend-per-file-ignores]
+"tests/*" = ["S101", "D"]
+"*/apps.py" = ["D"]
+"**/__init__.py" = ["D"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
