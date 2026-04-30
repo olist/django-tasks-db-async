@@ -15,9 +15,6 @@ from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from django.core.exceptions import SuspiciousOperation
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections, transaction
-from django.tasks import DEFAULT_TASK_BACKEND_ALIAS
-from django.tasks.base import DEFAULT_TASK_QUEUE_NAME, TaskContext
-from django.tasks.signals import task_finished, task_started
 from django.utils.crypto import get_random_string
 from django_tasks_db.models import DBTaskResult
 from opentelemetry import trace
@@ -31,8 +28,16 @@ from opentelemetry.semconv._incubating.attributes.messaging_attributes import (
     MessagingOperationTypeValues,
 )
 
+from django_tasks_db_async._compat import (
+    DEFAULT_TASK_BACKEND_ALIAS,
+    DEFAULT_TASK_QUEUE_NAME,
+    TaskContext,
+    task_finished,
+    task_started,
+)
+
 if TYPE_CHECKING:
-    from django.tasks import TaskResult
+    from django_tasks_db_async._compat import TaskResult
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
