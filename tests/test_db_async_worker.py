@@ -6,9 +6,6 @@ from unittest import mock
 
 import pytest
 from asgiref.sync import async_to_sync
-from django.tasks import task
-from django.tasks.base import TaskResultStatus
-from django.tasks.signals import task_finished
 from django.test import override_settings
 from django_tasks_db.models import DBTaskResult
 from opentelemetry import trace
@@ -16,6 +13,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from django_tasks_db_async._compat import TaskResultStatus, task, task_finished
 from django_tasks_db_async.management.commands.db_async_worker import Command, Worker
 
 pytestmark = pytest.mark.django_db
