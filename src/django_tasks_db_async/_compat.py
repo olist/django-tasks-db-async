@@ -1,3 +1,4 @@
+import sys
 from typing import Any
 
 import django
@@ -24,11 +25,17 @@ else:
     from django_tasks.base import DEFAULT_TASK_QUEUE_NAME, TaskContext, TaskResultStatus
     from django_tasks.signals import task_finished, task_started
 
+if sys.version_info >= (3, 11):
+    from asyncio import TaskGroup
+else:
+    from taskgroup import TaskGroup
+
 
 __all__ = [
     "DEFAULT_TASK_BACKEND_ALIAS",
     "DEFAULT_TASK_QUEUE_NAME",
     "TaskContext",
+    "TaskGroup",
     "TaskResult",
     "TaskResultStatus",
     "dispatch_signal",

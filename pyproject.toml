@@ -33,6 +33,7 @@ dependencies = [
   "asgiref",
   "django-tasks-db",
   "opentelemetry-api",
+  "taskgroup; python_version < '3.11'"
 ]
 dynamic = ["version"]
 

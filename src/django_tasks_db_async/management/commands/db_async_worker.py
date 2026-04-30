@@ -32,6 +32,7 @@ from django_tasks_db_async._compat import (
     DEFAULT_TASK_BACKEND_ALIAS,
     DEFAULT_TASK_QUEUE_NAME,
     TaskContext,
+    TaskGroup,
     dispatch_signal,
     task_finished,
     task_started,
@@ -87,7 +88,7 @@ class Worker:
         await asyncio.sleep(random.random())  # noqa: S311
 
         while not stop_sign.is_set():
-            async with ThreadSensitiveContext(), asyncio.TaskGroup() as tg:  # type: ignore[no-untyped-call]
+            async with ThreadSensitiveContext(), TaskGroup() as tg:  # type: ignore[no-untyped-call]
                 try:
                     task = await self._claim_task(queue_names)
                     if task:
@@ -317,7 +318,7 @@ class Command(BaseCommand):
                     stop_sign.set()
                 yield
 
-        async with asyncio.TaskGroup() as tg:
+        async with TaskGroup() as tg:
             for i in range(concurrency):
                 tg.create_task(
                     Worker(
