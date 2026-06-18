@@ -31,11 +31,16 @@ classifiers = [
 ]
 dependencies = [
   "asgiref",
+  "django",
   "django-tasks-db",
   "opentelemetry-api",
+  "opentelemetry-semantic-conventions",
   "taskgroup; python_version < '3.11'"
 ]
 dynamic = ["version"]
+
+[project.optional-dependencies]
+tasks = ["django_tasks"]
 
 [project.urls]
 Documentation = "https://github.com/olist/django-tasks-db-async#readme"
@@ -78,6 +83,7 @@ exclude_lines = [
 ]
 
 [tool.deptry]
+experimental_namespace_package = true
 known_first_party = ["django_tasks_db_async"]
 
 [tool.django-stubs]

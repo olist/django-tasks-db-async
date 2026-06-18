@@ -34,6 +34,9 @@ jobs:
     - name: Install Hatch
       run: pip install --upgrade hatch
 
+    - name: Run dependency check
+      run: hatch run deptry .
+
     - name: Run static analysis
       run: hatch fmt --check
 
