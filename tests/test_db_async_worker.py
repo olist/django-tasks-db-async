@@ -1,4 +1,5 @@
 """Tests for the db_async_worker management command."""
+
 import asyncio
 from collections.abc import Callable, Generator
 from typing import Any
@@ -60,7 +61,7 @@ class TestWorker:
         queue: asyncio.Queue[DBTaskResult] = asyncio.Queue()
         queue.put_nowait(db_task_result)
 
-        async def run_task_and_stop(task_result: DBTaskResult) -> None:
+        async def run_task_and_stop(_task_result: DBTaskResult) -> None:
             worker.stop()
 
         with mock.patch.object(worker, "run_task", side_effect=run_task_and_stop) as mock_run_task:
@@ -209,36 +210,28 @@ class TestSupervisor:
     def test_batch_mode_exits_immediately_when_no_tasks_available(self) -> None:
         """Test that supervisor in batch mode exits without processing when the queue is empty."""
         with mock.patch.object(Worker, "run_task") as mock_run_task:
-            async_to_sync(Supervisor("default", ["*"], "test-worker").run)(
-                concurrency=1, interval=0, batch=True
-            )
+            async_to_sync(Supervisor("default", ["*"], "test-worker").run)(concurrency=1, interval=0, batch=True)
         mock_run_task.assert_not_awaited()
 
     def test_batch_mode_processes_all_available_tasks_then_exits(self) -> None:
         """Test that supervisor processes all available tasks in batch mode then exits."""
         enqueued = [_noop_task.enqueue(), _noop_task.enqueue()]
         with mock.patch.object(Worker, "run_task") as mock_run_task:
-            async_to_sync(Supervisor("default", ["*"], "test-worker").run)(
-                concurrency=1, interval=0, batch=True
-            )
+            async_to_sync(Supervisor("default", ["*"], "test-worker").run)(concurrency=1, interval=0, batch=True)
         assert mock_run_task.await_count == len(enqueued)
 
     def test_wildcard_queue_processes_tasks_from_any_queue(self) -> None:
         """Test that queue_names=['*'] processes tasks regardless of their queue."""
         enqueued = [_noop_task.using(queue_name="other").enqueue()]
         with mock.patch.object(Worker, "run_task") as mock_run_task:
-            async_to_sync(Supervisor("default", ["*"], "test-worker").run)(
-                concurrency=1, interval=0, batch=True
-            )
+            async_to_sync(Supervisor("default", ["*"], "test-worker").run)(concurrency=1, interval=0, batch=True)
         assert mock_run_task.await_count == len(enqueued)
 
     def test_specific_queue_skips_tasks_in_other_queues(self) -> None:
         """Test that a specific queue_name does not process tasks from other queues."""
         _noop_task.using(queue_name="other").enqueue()
         with mock.patch.object(Worker, "run_task") as mock_run_task:
-            async_to_sync(Supervisor("default", ["default"], "test-worker").run)(
-                concurrency=1, interval=0, batch=True
-            )
+            async_to_sync(Supervisor("default", ["default"], "test-worker").run)(concurrency=1, interval=0, batch=True)
         mock_run_task.assert_not_awaited()
 
     def test_max_tasks_limits_total_tasks_processed(self) -> None:
@@ -258,25 +251,23 @@ class TestSupervisor:
         supervisor = Supervisor("default", ["*"], "test-worker")
         call_count = 0
 
-        async def sleep_and_eventually_stop(duration: float) -> None:
+        async def sleep_and_eventually_stop(_duration: float) -> None:
             nonlocal call_count
             call_count += 1
-            if call_count >= 2:
+            if call_count >= 2:  # noqa: PLR2004
                 supervisor.request_shutdown()
 
         with mock.patch("asyncio.sleep", side_effect=sleep_and_eventually_stop) as mock_sleep:
             async_to_sync(supervisor.run)(concurrency=1, interval=interval, batch=False)
 
-        assert any(
-            call == mock.call(pytest.approx(interval)) for call in mock_sleep.await_args_list
-        )
+        assert any(call == mock.call(pytest.approx(interval)) for call in mock_sleep.await_args_list)
 
     def test_request_shutdown_stops_processing_after_current_tasks_finish(self) -> None:
         """Test that request_shutdown stops the puller and lets in-flight tasks complete."""
         supervisor = Supervisor("default", ["*"], "test-worker")
         tasks_processed = 0
 
-        async def run_task_and_shutdown(db_task_result: DBTaskResult) -> None:
+        async def run_task_and_shutdown(_db_task_result: DBTaskResult) -> None:
             nonlocal tasks_processed
             tasks_processed += 1
             supervisor.request_shutdown()
@@ -295,8 +286,8 @@ class TestCommand:
         """Test that ahandle parses comma-separated queue_name into a list for the Supervisor."""
         with mock.patch(
             "django_tasks_db_async.management.commands.db_async_worker.Supervisor",
-        ) as MockSupervisor:
-            MockSupervisor.return_value.run = mock.AsyncMock()
+        ) as mock_supervisor:
+            mock_supervisor.return_value.run = mock.AsyncMock()
             async_to_sync(Command().ahandle)(
                 queue_name="queue-a,queue-b",
                 interval=0,
@@ -306,16 +297,16 @@ class TestCommand:
                 worker_id="test-worker",
                 concurrency=1,
             )
-        MockSupervisor.assert_called_once_with("default", ["queue-a", "queue-b"], "test-worker", None)
-        MockSupervisor.return_value.run.assert_awaited_once_with(concurrency=1, interval=0, batch=True)
+        mock_supervisor.assert_called_once_with("default", ["queue-a", "queue-b"], "test-worker", None)
+        mock_supervisor.return_value.run.assert_awaited_once_with(concurrency=1, interval=0, batch=True)
 
     def test_ahandle_passes_concurrency_to_supervisor_run(self) -> None:
         """Test that ahandle forwards the concurrency argument to supervisor.run."""
         concurrency = 3
         with mock.patch(
             "django_tasks_db_async.management.commands.db_async_worker.Supervisor",
-        ) as MockSupervisor:
-            MockSupervisor.return_value.run = mock.AsyncMock()
+        ) as mock_supervisor:
+            mock_supervisor.return_value.run = mock.AsyncMock()
             async_to_sync(Command().ahandle)(
                 queue_name="default",
                 interval=0,
@@ -325,6 +316,4 @@ class TestCommand:
                 worker_id="test-worker",
                 concurrency=concurrency,
             )
-        MockSupervisor.return_value.run.assert_awaited_once_with(
-            concurrency=concurrency, interval=0, batch=True
-        )
+        mock_supervisor.return_value.run.assert_awaited_once_with(concurrency=concurrency, interval=0, batch=True)
