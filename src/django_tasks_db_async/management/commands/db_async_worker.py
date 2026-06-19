@@ -2,13 +2,10 @@
 
 import asyncio
 import gc
-import itertools
 import logging
-import random
 import signal
 import threading
 from argparse import ArgumentParser
-from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from asgiref.sync import ThreadSensitiveContext, sync_to_async
@@ -16,7 +13,7 @@ from django.core.exceptions import SuspiciousOperation
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections, transaction
 from django.utils.crypto import get_random_string
-from django_tasks_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult, TaskResultStatus
 from opentelemetry import trace
 from opentelemetry.semconv._incubating.attributes.messaging_attributes import (
     MESSAGING_CLIENT_ID,
@@ -31,6 +28,7 @@ from opentelemetry.semconv._incubating.attributes.messaging_attributes import (
 from django_tasks_db_async._compat import (
     DEFAULT_TASK_BACKEND_ALIAS,
     DEFAULT_TASK_QUEUE_NAME,
+    BaseExceptionGroup,
     TaskContext,
     TaskGroup,
     dispatch_signal,
@@ -45,63 +43,41 @@ logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
+class TerminateTaskGroup(BaseException):
+    """Raised inside a TaskGroup to cancel all sibling tasks and exit the group immediately."""
+
+
 class Worker:
     """Async worker that polls queues, claims tasks atomically, and executes them."""
 
-    def __init__(self, worker_id: str, backend_name: str, interval: float) -> None:
+    def __init__(self, worker_id: str, backend_name: str) -> None:
         """Initialize the worker with a unique ID, target backend, and polling interval."""
         self.worker_id = worker_id
         self.backend_name = backend_name
-        self.interval = interval
         self._tasks_run = 0
+        self._stop_sign = asyncio.Event()
 
-    @sync_to_async
-    def _claim_task(self, queue_names: Sequence[str]) -> DBTaskResult[Any, Any] | None:
-        with transaction.atomic():
-            tasks = DBTaskResult.objects.ready().filter(backend_name=self.backend_name)
-            if queue_names != ["*"]:
-                tasks = tasks.filter(queue_name__in=queue_names)
-
-            task = tasks.select_for_update(skip_locked=True, no_key=True).first()
-            if task is not None:
-                task.claim(self.worker_id)
-            return task
-
-    async def run(
-        self,
-        queue_names: Sequence[str],
-        *,
-        batch: bool,
-        stop_sign: asyncio.Event,
-        task_counter: Iterator[None],
-    ) -> None:
+    async def run(self, work_queue: asyncio.Queue[DBTaskResult]) -> None:
         """Poll queues in a loop until stop_sign is set, dispatching each claimed task."""
-        logger.info(
-            "Worker started worker_id=%r queue_names=%r backend=%r interval=%r batch=%r",
-            self.worker_id,
-            queue_names,
-            self.backend_name,
-            self.interval,
-            batch,
-        )
+        logger.info("Worker started, worker_id=%r", self.worker_id)
 
-        await asyncio.sleep(random.random())  # noqa: S311
+        async with ThreadSensitiveContext(), TaskGroup() as tg:  # type: ignore[no-untyped-call]
+            stop_task = tg.create_task(self._stop_sign.wait())
+            while True:
+                work_task = tg.create_task(work_queue.get())
+                await asyncio.wait([work_task, stop_task], return_when=asyncio.FIRST_COMPLETED)
 
-        while not stop_sign.is_set():
-            async with ThreadSensitiveContext(), TaskGroup() as tg:  # type: ignore[no-untyped-call]
-                try:
-                    task = await self._claim_task(queue_names)
-                    if task:
-                        await tg.create_task(self.run_task(task))
-                        next(task_counter)
-                finally:
-                    await sync_to_async(close_old_connections)()
+                if work_task.done():
+                    try:
+                        await tg.create_task(self.run_task(work_task.result()))
+                        work_queue.task_done()
+                    finally:
+                        await sync_to_async(close_old_connections)()
+                else:
+                    work_task.cancel()
 
-                if not task:
-                    if batch:
-                        break
-
-                    await asyncio.sleep(self.interval)
+                if self._stop_sign.is_set():
+                    break
 
         logger.info("Worker stopped worker_id=%r tasks_run=%r", self.worker_id, self._tasks_run)
 
@@ -178,6 +154,153 @@ class Worker:
                     await dispatch_signal(task_finished, backend_type, task_result=task_result)
             finally:
                 self._tasks_run += 1
+
+    def stop(self) -> None:
+        """Signal the worker to stop accepting new tasks after the current one finishes."""
+        self._stop_sign.set()
+
+
+class Supervisor:
+    """Orchestrates a pool of Workers: claims tasks from the DB, feeds them via a queue, and handles shutdown."""
+
+    def __init__(self, backend_name: str, queue_names: list[str], worker_id: str, max_tasks: int | None = None) -> None:
+        """Initialize the supervisor with target backend, queue names, worker identity, and optional task cap."""
+        self.backend_name = backend_name
+        self.queue_names = queue_names
+        self.worker_id = worker_id
+        self.max_tasks = max_tasks
+        self.shutdown_requested = False
+        self.force_shutdown_sign = asyncio.Event()
+        self.total_tasks = 0
+        self.spawned_workers = 0
+        self.workers: set[Worker] = set()
+
+    async def run(
+        self,
+        *,
+        concurrency: int,
+        interval: float | None = None,
+        batch: bool,
+    ) -> None:
+        """Start the worker pool, pull tasks from the DB, and drain the queue on shutdown.
+
+        In batch mode exits after all currently-ready tasks are processed; otherwise
+        polls continuously at the given interval until a shutdown is requested.
+        """
+        queue = asyncio.Queue[DBTaskResult](concurrency)
+
+        async def _force_shutdown() -> None:
+            await self.force_shutdown_sign.wait()
+            raise TerminateTaskGroup
+
+        try:
+            async with TaskGroup() as tg:
+                forced_shutdown_task = tg.create_task(_force_shutdown())
+                puller = tg.create_task(
+                    self._pull_tasks(
+                        queue,
+                        interval=interval or 0,
+                        concurrency=concurrency,
+                        batch=batch,
+                    )
+                )
+
+                for _ in range(concurrency):
+                    self._spawn_worker(tg, queue)
+
+                await puller
+                tg.create_task(self._unclaim(queue))
+                await queue.join()
+                self._shutdown_workers()
+                forced_shutdown_task.cancel()
+
+        except BaseExceptionGroup as exc:
+            _, remaining = exc.split(TerminateTaskGroup)
+            if remaining:
+                raise remaining from exc
+
+    def request_shutdown(self) -> None:
+        """Request a graceful shutdown: stop claiming new tasks and let running tasks finish."""
+        self.shutdown_requested = True
+        self._shutdown_workers()
+
+    def force_shutdown(self) -> None:
+        """Trigger an immediate shutdown by raising TerminateTaskGroup, abandoning in-flight tasks."""
+        self.force_shutdown_sign.set()
+
+    def _spawn_worker(self, tg: TaskGroup, work_queue: asyncio.Queue[DBTaskResult]) -> Worker:
+        worker = Worker(f"{self.worker_id}-{self.spawned_workers:02}", backend_name=self.backend_name)
+        task = tg.create_task(worker.run(work_queue))
+        task.add_done_callback(lambda _: self.workers.discard(worker))
+        self.workers.add(worker)
+        self.spawned_workers += 1
+        return worker
+
+    def _shutdown_workers(self) -> None:
+        for w in self.workers:
+            w.stop()
+
+    @sync_to_async
+    def _claim_tasks(self, amount: int) -> list[DBTaskResult]:
+        with transaction.atomic():
+            tasks_qs = DBTaskResult._default_manager.ready().filter(backend_name=self.backend_name)
+            if self.queue_names != ["*"]:
+                tasks_qs = tasks_qs.filter(queue_name__in=self.queue_names)
+
+            tasks = list(tasks_qs[:amount].select_for_update(skip_locked=True, no_key=True))
+            for task in tasks:
+                task.claim(self.worker_id)
+
+            close_old_connections()
+            return tasks
+
+    async def _pull_tasks(
+        self,
+        queue: asyncio.Queue[DBTaskResult],
+        *,
+        interval: float,
+        concurrency: int,
+        batch: bool,
+    ) -> None:
+        async with ThreadSensitiveContext():
+            while not self.shutdown_requested:
+                if queue.qsize() >= len(self.workers):
+                    await asyncio.sleep(interval)
+                    continue
+
+                tasks_to_claim = concurrency
+                if self.max_tasks is not None:
+                    remaining_tasks = max(self.max_tasks - self.total_tasks, 0)
+
+                    if remaining_tasks == 0:
+                        break
+
+                    tasks_to_claim = min(remaining_tasks, concurrency)
+
+                tasks = await self._claim_tasks(tasks_to_claim)
+                for task in tasks:
+                    await queue.put(task)
+
+                self.total_tasks += len(tasks)
+
+                if not tasks:
+                    if batch:
+                        break
+
+                    await asyncio.sleep(interval)
+
+    async def _unclaim(self, queue: asyncio.Queue[DBTaskResult]) -> None:
+        async with ThreadSensitiveContext():
+            # Unclaim tasks
+            while not queue.empty():
+                task = await queue.get()
+                task.status = TaskResultStatus.READY
+                task.started_at = None
+                task.worker_ids = task.worker_ids[:-1]
+                await task.asave()
+                queue.task_done()
+
+            await sync_to_async(close_old_connections)()
 
 
 class Command(BaseCommand):
@@ -278,7 +401,6 @@ class Command(BaseCommand):
     ) -> None:
         """Spawn concurrency Worker coroutines and wire SIGTERM/SIGINT for graceful shutdown."""
         queue_names = queue_name.split(",")
-        stop_sign = asyncio.Event()
 
         logger.info(
             "Starting db_async_worker worker_id=%r backend_name=%r queue_names=%r"
@@ -292,43 +414,29 @@ class Command(BaseCommand):
             max_tasks,
         )
 
+        supervisor = Supervisor(backend_name, queue_names, worker_id, max_tasks)
+
         def request_shutdown(signum: int) -> None:
-            logger.info(
-                "Shutdown requested, waiting for running tasks to finish worker_id=%r backend_name=%r signal=%r",
-                worker_id,
-                backend_name,
-                signal.Signals(signum).name,
-            )
-            stop_sign.set()
+            if not supervisor.shutdown_requested:
+                logger.info(
+                    "Shutdown requested, waiting for running tasks to finish worker_id=%r backend_name=%r signal=%r",
+                    worker_id,
+                    backend_name,
+                    signal.Signals(signum).name,
+                )
+                supervisor.request_shutdown()
+            elif signum == signal.SIGINT:
+                logger.info(
+                    "Forcing shutdown of worker_id=%r backend_name=%r signal=%r",
+                    worker_id,
+                    backend_name,
+                    signal.Signals(signum).name,
+                )
+                supervisor.force_shutdown()
 
         if threading.current_thread() is threading.main_thread():
             loop = asyncio.get_running_loop()
             for signum in [signal.SIGTERM, signal.SIGINT]:
                 loop.add_signal_handler(signum, request_shutdown, signum)
 
-        def total_tasks() -> Iterator[None]:
-            for i in itertools.count(1):
-                if max_tasks is not None and i >= max_tasks and not stop_sign.is_set():
-                    logger.info(
-                        "Max tasks reached, stopping worker_id=%r backend_name=%r max_tasks=%r",
-                        worker_id,
-                        backend_name,
-                        max_tasks,
-                    )
-                    stop_sign.set()
-                yield
-
-        async with TaskGroup() as tg:
-            for i in range(concurrency):
-                tg.create_task(
-                    Worker(
-                        f"{worker_id}-{i:02}",
-                        backend_name,
-                        interval,
-                    ).run(
-                        queue_names,
-                        batch=batch,
-                        stop_sign=stop_sign,
-                        task_counter=total_tasks(),
-                    ),
-                )
+        await supervisor.run(concurrency=concurrency, interval=interval, batch=batch)

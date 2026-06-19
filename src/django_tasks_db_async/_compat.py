@@ -27,13 +27,17 @@ else:
 
 if sys.version_info >= (3, 11):
     from asyncio import TaskGroup
+
+    BaseExceptionGroup = BaseExceptionGroup  # noqa: F821, PLW0127
 else:
+    from exceptiongroup import BaseExceptionGroup
     from taskgroup import TaskGroup
 
 
 __all__ = [
     "DEFAULT_TASK_BACKEND_ALIAS",
     "DEFAULT_TASK_QUEUE_NAME",
+    "BaseExceptionGroup",
     "TaskContext",
     "TaskGroup",
     "TaskResult",

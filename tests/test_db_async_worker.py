@@ -1,6 +1,6 @@
+"""Tests for the db_async_worker management command."""
 import asyncio
-import itertools
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator
 from typing import Any
 from unittest import mock
 
@@ -15,7 +15,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from django_tasks_db_async._compat import TaskResultStatus, task, task_finished, task_started
-from django_tasks_db_async.management.commands.db_async_worker import Command, Worker
+from django_tasks_db_async.management.commands.db_async_worker import Command, Supervisor, Worker
 
 pytestmark = pytest.mark.django_db
 
@@ -51,152 +51,42 @@ class TestWorker:
         ) as mock_close:
             yield mock_close
 
-    def test_run_batch_mode_exits_immediately_when_no_tasks_available(
-        self,
-        mock_close_old_connections: mock.Mock,
-    ) -> None:
-        """Test if run in batch mode exits without processing when the queue is empty."""
-        worker = Worker("w-00", "default", interval=0)
-        with mock.patch.object(worker, "run_task") as mock_run_task:
-            async_to_sync(worker.run)(
-                ["*"],
-                batch=True,
-                stop_sign=asyncio.Event(),
-                task_counter=itertools.repeat(None),
-            )
-        mock_run_task.assert_not_awaited()
+    # --- Worker.run ---
+
+    def test_run_processes_task_from_queue(self, mock_close_old_connections: mock.Mock) -> None:
+        """Test that run picks a task from the work queue, executes it, and signals task_done."""
+        db_task_result = DBTaskResult.objects.get(id=_noop_task.enqueue().id)
+        worker = Worker("w-00", "default")
+        queue: asyncio.Queue[DBTaskResult] = asyncio.Queue()
+        queue.put_nowait(db_task_result)
+
+        async def run_task_and_stop(task_result: DBTaskResult) -> None:
+            worker.stop()
+
+        with mock.patch.object(worker, "run_task", side_effect=run_task_and_stop) as mock_run_task:
+            async_to_sync(worker.run)(queue)
+
+        mock_run_task.assert_awaited_once_with(db_task_result)
+        assert queue.empty()
         mock_close_old_connections.assert_called_once()
 
-    def test_run_wildcard_queue_processes_tasks_from_any_queue(
+    def test_run_stops_immediately_when_stop_called_before_start(
         self,
         mock_close_old_connections: mock.Mock,
     ) -> None:
-        """Test if run with queue_names=['*'] processes tasks regardless of their queue."""
-        enqueued_tasks = [_noop_task.using(queue_name="other").enqueue()]
-        worker = Worker("w-00", "default", interval=0)
-        with mock.patch.object(worker, "run_task") as mock_run_task:
-            async_to_sync(worker.run)(
-                ["*"],
-                batch=True,
-                stop_sign=asyncio.Event(),
-                task_counter=itertools.repeat(None),
-            )
-        assert mock_run_task.await_count == len(enqueued_tasks)
-        assert mock_close_old_connections.call_count == len(enqueued_tasks) + 1
-
-    def test_run_specific_queue_skips_tasks_in_other_queues(self, mock_close_old_connections: mock.Mock) -> None:
-        """Test if run with a specific queue name does not process tasks in other queues."""
-        _noop_task.using(queue_name="other").enqueue()
-        worker = Worker("w-00", "default", interval=0)
-        with mock.patch.object(worker, "run_task") as mock_run_task:
-            async_to_sync(worker.run)(
-                ["my-queue"],
-                batch=True,
-                stop_sign=asyncio.Event(),
-                task_counter=itertools.repeat(None),
-            )
-        mock_run_task.assert_not_awaited()
-        mock_close_old_connections.assert_called_once()
-
-    def test_run_batch_mode_processes_all_available_tasks_then_exits(
-        self,
-        mock_close_old_connections: mock.Mock,
-    ) -> None:
-        """Test if run in batch mode processes all available tasks before exiting."""
-        enqueued_tasks = [_noop_task.enqueue(), _noop_task.enqueue()]
-        worker = Worker("w-00", "default", interval=0)
-        with mock.patch.object(worker, "run_task") as mock_run_task:
-            async_to_sync(worker.run)(
-                ["*"],
-                batch=True,
-                stop_sign=asyncio.Event(),
-                task_counter=itertools.repeat(None),
-            )
-        assert mock_run_task.await_count == len(enqueued_tasks)
-        assert mock_close_old_connections.call_count == len(enqueued_tasks) + 1
-
-    def test_run_stops_processing_after_max_tasks_is_reached(self, mock_close_old_connections: mock.Mock) -> None:
-        """Test if run stops processing tasks once the max_tasks limit is reached."""
-        for _ in range(5):
-            _noop_task.enqueue()
-        worker = Worker("w-00", "default", interval=0)
-        stop = asyncio.Event()
-        counter_yields = [None, None]
-
-        def dummy_counter() -> Iterator[None]:
-            for i, _ in enumerate(counter_yields):
-                if i == len(counter_yields) - 1:
-                    stop.set()
-                yield
-
-        with mock.patch.object(worker, "run_task") as mock_run_task:
-            async_to_sync(worker.run)(
-                ["*"],
-                batch=True,
-                stop_sign=stop,
-                task_counter=dummy_counter(),
-            )
-        assert mock_run_task.await_count == len(counter_yields)
-        assert mock_close_old_connections.call_count == len(counter_yields)
-
-    def test_run_stops_processing_when_stop_sign_is_set(self, mock_close_old_connections: mock.Mock) -> None:
-        """Test if run exits immediately when stop_sign is already set, without processing tasks."""
+        """Test that run exits without processing any task if stop() is called before run."""
         _noop_task.enqueue()
-        worker = Worker("w-00", "default", interval=0)
-        stop_sign = asyncio.Event()
-        stop_sign.set()
+        worker = Worker("w-00", "default")
+        queue: asyncio.Queue[DBTaskResult] = asyncio.Queue()
+        worker.stop()
+
         with mock.patch.object(worker, "run_task") as mock_run_task:
-            async_to_sync(worker.run)(
-                ["*"],
-                batch=False,
-                stop_sign=stop_sign,
-                task_counter=itertools.repeat(None),
-            )
+            async_to_sync(worker.run)(queue)
+
         mock_run_task.assert_not_awaited()
         mock_close_old_connections.assert_not_called()
 
-    def test_run_non_batch_sleeps_interval_when_queue_is_empty(self) -> None:
-        """Test if run sleeps for the configured interval when no task is found in the queue."""
-        interval = 5.0
-        worker = Worker("w-00", "default", interval=interval)
-        stop = asyncio.Event()
-        slept = False
-
-        async def sleep_and_stop(_duration: float) -> None:
-            nonlocal slept
-            if not slept:
-                slept = True
-            else:
-                stop.set()
-
-        with mock.patch("asyncio.sleep", side_effect=sleep_and_stop) as mock_sleep:
-            async_to_sync(worker.run)(
-                ["*"],
-                batch=False,
-                stop_sign=stop,
-                task_counter=itertools.repeat(None),
-            )
-        assert mock_sleep.await_args_list == [mock.ANY, mock.call(pytest.approx(interval))]
-
-    def test_run_non_batch_does_not_sleep_interval_after_processing_task(self) -> None:
-        """Test if run does not sleep for the configured interval after a task is processed."""
-        _noop_task.enqueue()
-        worker = Worker("w-00", "default", interval=5.0)
-        stop = asyncio.Event()
-
-        def dummy_counter() -> Iterator[None]:
-            stop.set()
-            yield
-
-        with mock.patch("asyncio.sleep") as mock_sleep:
-            async_to_sync(worker.run)(
-                ["*"],
-                batch=False,
-                stop_sign=stop,
-                task_counter=dummy_counter(),
-            )
-
-        mock_sleep.assert_awaited_once()
+    # --- Worker.run_task ---
 
     @pytest.fixture
     def signal_collector(self) -> Generator[Callable[[Signal], list], Any]:
@@ -228,8 +118,6 @@ class TestWorker:
         ):
             yield exporter
 
-    # --- run_task ---
-
     def test_run_task_successful_task_marks_as_successful_stores_return_value_and_sends_signal(
         self,
         span_exporter: InMemorySpanExporter,
@@ -238,7 +126,7 @@ class TestWorker:
         """Test if run_task marks as SUCCESSFUL, stores the return value, sends signal and records a span."""
         started = signal_collector(task_started)
         finished = signal_collector(task_finished)
-        worker = Worker("w-00", "default", interval=0)
+        worker = Worker("w-00", "default")
         db_task_result = DBTaskResult.objects.get(id=_noop_task.enqueue().id)
         db_task_result.claim(worker.worker_id)
         async_to_sync(worker.run_task)(db_task_result)
@@ -267,7 +155,7 @@ class TestWorker:
         """Test if run_task marks as FAILED, sends task_finished, records exception and sets span to ERROR."""
         started = signal_collector(task_started)
         finished = signal_collector(task_finished)
-        worker = Worker("w-00", "default", interval=0)
+        worker = Worker("w-00", "default")
         db_task_result = DBTaskResult.objects.get(id=_failing_task.enqueue().id)
         db_task_result.claim(worker.worker_id)
         async_to_sync(worker.run_task)(db_task_result)
@@ -289,7 +177,7 @@ class TestWorker:
         """Test if run_task does not send task_started or task_finished when task_path is not importable."""
         started = signal_collector(task_started)
         finished = signal_collector(task_finished)
-        worker = Worker("w-00", "default", interval=0)
+        worker = Worker("w-00", "default")
         db_task_result = DBTaskResult.objects.get(id=_noop_task.enqueue().id)
         db_task_result.task_path = "nonexistent.module.deleted_function"
         db_task_result.claim(worker.worker_id)
@@ -298,46 +186,145 @@ class TestWorker:
         assert not finished
 
 
+class TestSupervisor:
+    @pytest.fixture(autouse=True)
+    def _tasks_settings(self) -> Generator[None, Any]:
+        with override_settings(
+            TASKS={
+                "default": {
+                    "BACKEND": "django_tasks_db.DatabaseBackend",
+                    "QUEUES": ["default", "other"],
+                },
+            },
+        ):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def mock_close_old_connections(self) -> Generator[mock.AsyncMock, Any]:
+        with mock.patch(
+            "django_tasks_db_async.management.commands.db_async_worker.close_old_connections",
+        ) as mock_close:
+            yield mock_close
+
+    def test_batch_mode_exits_immediately_when_no_tasks_available(self) -> None:
+        """Test that supervisor in batch mode exits without processing when the queue is empty."""
+        with mock.patch.object(Worker, "run_task") as mock_run_task:
+            async_to_sync(Supervisor("default", ["*"], "test-worker").run)(
+                concurrency=1, interval=0, batch=True
+            )
+        mock_run_task.assert_not_awaited()
+
+    def test_batch_mode_processes_all_available_tasks_then_exits(self) -> None:
+        """Test that supervisor processes all available tasks in batch mode then exits."""
+        enqueued = [_noop_task.enqueue(), _noop_task.enqueue()]
+        with mock.patch.object(Worker, "run_task") as mock_run_task:
+            async_to_sync(Supervisor("default", ["*"], "test-worker").run)(
+                concurrency=1, interval=0, batch=True
+            )
+        assert mock_run_task.await_count == len(enqueued)
+
+    def test_wildcard_queue_processes_tasks_from_any_queue(self) -> None:
+        """Test that queue_names=['*'] processes tasks regardless of their queue."""
+        enqueued = [_noop_task.using(queue_name="other").enqueue()]
+        with mock.patch.object(Worker, "run_task") as mock_run_task:
+            async_to_sync(Supervisor("default", ["*"], "test-worker").run)(
+                concurrency=1, interval=0, batch=True
+            )
+        assert mock_run_task.await_count == len(enqueued)
+
+    def test_specific_queue_skips_tasks_in_other_queues(self) -> None:
+        """Test that a specific queue_name does not process tasks from other queues."""
+        _noop_task.using(queue_name="other").enqueue()
+        with mock.patch.object(Worker, "run_task") as mock_run_task:
+            async_to_sync(Supervisor("default", ["default"], "test-worker").run)(
+                concurrency=1, interval=0, batch=True
+            )
+        mock_run_task.assert_not_awaited()
+
+    def test_max_tasks_limits_total_tasks_processed(self) -> None:
+        """Test that max_tasks caps the number of tasks processed across all workers."""
+        max_tasks = 2
+        for _ in range(5):
+            _noop_task.enqueue()
+        with mock.patch.object(Worker, "run_task") as mock_run_task:
+            async_to_sync(Supervisor("default", ["*"], "test-worker", max_tasks=max_tasks).run)(
+                concurrency=1, interval=0, batch=True
+            )
+        assert mock_run_task.await_count == max_tasks
+
+    def test_non_batch_sleeps_interval_when_no_tasks_available(self) -> None:
+        """Test that the puller sleeps for the configured interval when no tasks are found."""
+        interval = 5.0
+        supervisor = Supervisor("default", ["*"], "test-worker")
+        call_count = 0
+
+        async def sleep_and_eventually_stop(duration: float) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                supervisor.request_shutdown()
+
+        with mock.patch("asyncio.sleep", side_effect=sleep_and_eventually_stop) as mock_sleep:
+            async_to_sync(supervisor.run)(concurrency=1, interval=interval, batch=False)
+
+        assert any(
+            call == mock.call(pytest.approx(interval)) for call in mock_sleep.await_args_list
+        )
+
+    def test_request_shutdown_stops_processing_after_current_tasks_finish(self) -> None:
+        """Test that request_shutdown stops the puller and lets in-flight tasks complete."""
+        supervisor = Supervisor("default", ["*"], "test-worker")
+        tasks_processed = 0
+
+        async def run_task_and_shutdown(db_task_result: DBTaskResult) -> None:
+            nonlocal tasks_processed
+            tasks_processed += 1
+            supervisor.request_shutdown()
+
+        _noop_task.enqueue()
+        _noop_task.enqueue()
+
+        with mock.patch.object(Worker, "run_task", side_effect=run_task_and_shutdown):
+            async_to_sync(supervisor.run)(concurrency=1, interval=0, batch=False)
+
+        assert tasks_processed == 1
+
+
 class TestCommand:
     def test_ahandle_splits_comma_separated_queue_names(self) -> None:
-        """Test if ahandle splits a comma-separated queue_name into individual queue names."""
-        with mock.patch.object(Worker, "run") as mock_run:
+        """Test that ahandle parses comma-separated queue_name into a list for the Supervisor."""
+        with mock.patch(
+            "django_tasks_db_async.management.commands.db_async_worker.Supervisor",
+        ) as MockSupervisor:
+            MockSupervisor.return_value.run = mock.AsyncMock()
             async_to_sync(Command().ahandle)(
                 queue_name="queue-a,queue-b",
                 interval=0,
                 batch=True,
                 backend_name="default",
-                max_tasks=1,
+                max_tasks=None,
                 worker_id="test-worker",
                 concurrency=1,
             )
-        mock_run.assert_awaited_once_with(
-            ["queue-a", "queue-b"],
-            batch=True,
-            stop_sign=mock.ANY,
-            task_counter=mock.ANY,
-        )
-        stop_sign = mock_run.await_args_list[0].kwargs["stop_sign"]
-        task_counter = mock_run.await_args_list[0].kwargs["task_counter"]
+        MockSupervisor.assert_called_once_with("default", ["queue-a", "queue-b"], "test-worker", None)
+        MockSupervisor.return_value.run.assert_awaited_once_with(concurrency=1, interval=0, batch=True)
 
-        assert isinstance(stop_sign, asyncio.Event)
-        assert stop_sign.is_set() is False
-
-        assert isinstance(task_counter, Iterator)
-        assert next(task_counter) is None
-        assert stop_sign.is_set() is True
-
-    def test_ahandle_creates_concurrency_number_of_workers(self) -> None:
-        """Test if ahandle spawns exactly as many workers as specified by concurrency."""
+    def test_ahandle_passes_concurrency_to_supervisor_run(self) -> None:
+        """Test that ahandle forwards the concurrency argument to supervisor.run."""
         concurrency = 3
-        with mock.patch.object(Worker, "run") as mock_run:
+        with mock.patch(
+            "django_tasks_db_async.management.commands.db_async_worker.Supervisor",
+        ) as MockSupervisor:
+            MockSupervisor.return_value.run = mock.AsyncMock()
             async_to_sync(Command().ahandle)(
                 queue_name="default",
                 interval=0,
                 batch=True,
                 backend_name="default",
-                max_tasks=0,
+                max_tasks=None,
                 worker_id="test-worker",
                 concurrency=concurrency,
             )
-        assert mock_run.await_count == concurrency
+        MockSupervisor.return_value.run.assert_awaited_once_with(
+            concurrency=concurrency, interval=0, batch=True
+        )

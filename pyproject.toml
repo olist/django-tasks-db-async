@@ -33,9 +33,10 @@ dependencies = [
   "asgiref",
   "django",
   "django-tasks-db",
+  "exceptiongroup; python_version < '3.11'",
   "opentelemetry-api",
   "opentelemetry-semantic-conventions",
-  "taskgroup; python_version < '3.11'"
+  "taskgroup; python_version < '3.11'",
 ]
 dynamic = ["version"]
 
@@ -220,6 +221,9 @@ ignore = ["COM812"]
 "tests/*" = ["S101", "D"]
 "*/apps.py" = ["D"]
 "**/__init__.py" = ["D"]
+
+[tool.ruff.lint.flake8-self]
+ignore-names = ["_default_manager", "_meta"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"
