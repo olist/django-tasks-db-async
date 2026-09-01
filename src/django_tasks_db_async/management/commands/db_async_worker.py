@@ -16,6 +16,13 @@ from django.core.exceptions import SuspiciousOperation
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections, transaction
 from django.utils.crypto import get_random_string
+from django_tasks_db.compat import (
+    DEFAULT_TASK_BACKEND_ALIAS,
+    DEFAULT_TASK_QUEUE_NAME,
+    TaskContext,
+    task_finished,
+    task_started,
+)
 from django_tasks_db.models import DBTaskResult
 from opentelemetry import trace
 from opentelemetry.semconv._incubating.attributes.messaging_attributes import (
@@ -28,18 +35,10 @@ from opentelemetry.semconv._incubating.attributes.messaging_attributes import (
     MessagingOperationTypeValues,
 )
 
-from django_tasks_db_async._compat import (
-    DEFAULT_TASK_BACKEND_ALIAS,
-    DEFAULT_TASK_QUEUE_NAME,
-    TaskContext,
-    TaskGroup,
-    dispatch_signal,
-    task_finished,
-    task_started,
-)
+from django_tasks_db_async._compat import TaskGroup
 
 if TYPE_CHECKING:
-    from django_tasks_db_async._compat import TaskResult
+    from django_tasks_db.compat import BaseTaskResult
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -121,7 +120,7 @@ class Worker:
             task_func_name: str | None = None
             try:
                 task = db_task_result.task
-                task_result = cast("TaskResult[Any, Any]", db_task_result.task_result)
+                task_result = cast("BaseTaskResult[Any, Any]", db_task_result.task_result)
                 backend_type = type(task.get_backend())
                 task_func_name = f"{task.func.__module__}.{task.func.__qualname__}"
                 span.set_attribute(MESSAGING_OPERATION_NAME, task_func_name)
@@ -133,7 +132,7 @@ class Worker:
                     db_task_result.queue_name,
                     task_func_name,
                 )
-                await dispatch_signal(task_started, backend_type, task_result=task_result)
+                await task_started.asend(backend_type, task_result=task_result)
                 if task.takes_context:
                     return_value = await task.acall(
                         TaskContext(task_result=task_result),
@@ -146,7 +145,7 @@ class Worker:
                 # Setting the return and success value inside the error handling,
                 # So errors setting it (eg JSON encode) can still be recorded
                 await sync_to_async(db_task_result.set_successful)(return_value)
-                await dispatch_signal(task_finished, backend_type, task_result=db_task_result.task_result)
+                await task_finished.asend(backend_type, task_result=db_task_result.task_result)
                 duration = (db_task_result.finished_at - db_task_result.started_at).total_seconds()
                 logger.info(
                     "Task complete worker_id=%r task_id=%r queue=%r task=%r duration=%r",
@@ -171,11 +170,11 @@ class Worker:
                 )
 
                 try:
-                    task_result = cast("TaskResult[Any, Any]", db_task_result.task_result)
+                    task_result = cast("BaseTaskResult[Any, Any]", db_task_result.task_result)
                 except (ImportError, SuspiciousOperation):
                     pass
                 else:
-                    await dispatch_signal(task_finished, backend_type, task_result=task_result)
+                    await task_finished.asend(backend_type, task_result=task_result)
             finally:
                 self._tasks_run += 1
 

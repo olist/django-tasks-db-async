@@ -11,11 +11,9 @@ keywords = []
 classifiers = [
   "Development Status :: 4 - Beta",
   "Framework :: Django",
-  "Framework :: Django :: 4.2",
-  "Framework :: Django :: 5.0",
-  "Framework :: Django :: 5.1",
   "Framework :: Django :: 5.2",
   "Framework :: Django :: 6.0",
+  "Framework :: Django :: 6.1",
   "Intended Audience :: Developers",
   "Natural Language :: English",
   "Operating System :: OS Independent",
@@ -31,26 +29,29 @@ classifiers = [
 ]
 dependencies = [
   "asgiref",
-  "django",
-  "django-tasks-db",
+  "django-tasks-db (>= 0.13)",
+  "django (>= 5.2)",
   "opentelemetry-api",
   "opentelemetry-semantic-conventions",
-  "taskgroup; python_version < '3.11'"
+  "taskgroup; python_version < '3.11'",
 ]
 dynamic = ["version"]
-
-[project.optional-dependencies]
-tasks = ["django_tasks"]
 
 [project.urls]
 Documentation = "https://github.com/olist/django-tasks-db-async#readme"
 Issues = "https://github.com/olist/django-tasks-db-async/issues"
 Source = "https://github.com/olist/django-tasks-db-async"
 
+[project.optional-dependencies]
+compat = [
+  "django-tasks-db[compat] (>= 0.13)",
+  "django-tasks",
+]
+
 [dependency-groups]
 dev = [
   "deptry",
-  "django-stubs (>=4.2)",
+  "django-stubs (>=5.2)",
   "mypy",
   "opentelemetry-sdk",
   "pre-commit",
@@ -69,10 +70,7 @@ branch = true
 parallel = true
 
 [tool.coverage.paths]
-django_tasks_db_async = [
-  "src/django_tasks_db_async",
-  "*/django-tasks-db-async/src/django_tasks_db_async"
-]
+django_tasks_db_async = ["src/django_tasks_db_async", "*/django-tasks-db-async/src/django_tasks_db_async"]
 tests = ["tests", "*/django-tasks-db-async/tests"]
 
 [tool.coverage.report]
@@ -105,28 +103,21 @@ extra-dependencies = [
 ]
 
 [[tool.hatch.envs.hatch-test.matrix]]
-django = ["4.2"]
-python = ["3.10", "3.11", "3.12", "3.13"]
-
-[[tool.hatch.envs.hatch-test.matrix]]
-django = ["5.0", "5.1"]
-python = ["3.10", "3.11", "3.12"]
-
-[[tool.hatch.envs.hatch-test.matrix]]
 django = ["5.2"]
 python = ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
 [[tool.hatch.envs.hatch-test.matrix]]
-django = ["6.0"]
+django = ["6.0", "6.1"]
 python = ["3.12", "3.13", "3.14"]
 
 [tool.hatch.envs.hatch-test.overrides]
 matrix.django.dependencies = [
-  { value = "django==4.2.*", if = ["4.2"] },
-  { value = "django==5.0.*", if = ["5.0"] },
-  { value = "django==5.1.*", if = ["5.1"] },
   { value = "django==5.2.*", if = ["5.2"] },
   { value = "django==6.0.*", if = ["6.0"] },
+  { value = "django==6.1.*", if = ["6.1"] },
+]
+matrix.django.features = [
+  { value = "compat", if = ["5.2"] },
 ]
 
 [tool.hatch.envs.hatch-static-analysis]
@@ -212,7 +203,7 @@ select = [
   "UP",
   "FURB",
   "RUF",
-  "TRY"
+  "TRY",
 ]
 ignore = ["COM812"]
 
