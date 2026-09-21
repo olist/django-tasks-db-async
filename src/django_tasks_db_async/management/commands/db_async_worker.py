@@ -4,17 +4,20 @@ import asyncio
 import gc
 import itertools
 import logging
+import os
 import random
 import signal
 import threading
-from argparse import ArgumentParser
+from argparse import ArgumentParser, BooleanOptionalAction
 from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from asgiref.sync import ThreadSensitiveContext, sync_to_async
+from django.conf import settings
 from django.core.exceptions import SuspiciousOperation
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections, transaction
+from django.utils.autoreload import DJANGO_AUTORELOAD_ENV, run_with_reloader
 from django.utils.crypto import get_random_string
 from django_tasks_db.compat import (
     DEFAULT_TASK_BACKEND_ALIAS,
@@ -233,6 +236,12 @@ class Command(BaseCommand):
             default=10,
             help="Maximum number of concurrent operations (default: %(default)r)",
         )
+        parser.add_argument(
+            "--reload",
+            action=BooleanOptionalAction,
+            default=settings.DEBUG,
+            help="Reload the worker on code changes. Not recommended for production as tasks may not be stopped cleanly (default: DEBUG)",  # noqa: E501
+        )
 
     def handle(  # noqa: PLR0913
         self,
@@ -244,25 +253,38 @@ class Command(BaseCommand):
         max_tasks: int | None,
         worker_id: str,
         concurrency: int,
+        reload: bool,
         **_options: Any,  # noqa: ANN401
     ) -> None:
         """Freeze GC, create an event loop with eager task factory, and delegate to ahandle."""
-        gc.collect()
-        gc.freeze()
+        if reload and batch:
+            logger.warning("Warning: --reload and --batch cannot be specified together. Disabling autoreload.")
+            reload = False
 
-        with asyncio.Runner() as runner:
-            runner.get_loop().set_task_factory(asyncio.eager_task_factory)
-            runner.run(
-                self.ahandle(
-                    queue_name=queue_name,
-                    interval=interval,
-                    batch=batch,
-                    backend_name=backend_name,
-                    max_tasks=max_tasks,
-                    worker_id=worker_id,
-                    concurrency=concurrency,
-                ),
-            )
+        def _run() -> None:
+            gc.collect()
+            gc.freeze()
+
+            with asyncio.Runner() as runner:
+                runner.get_loop().set_task_factory(asyncio.eager_task_factory)
+                runner.run(
+                    self.ahandle(
+                        queue_name=queue_name,
+                        interval=interval,
+                        batch=batch,
+                        backend_name=backend_name,
+                        max_tasks=max_tasks,
+                        worker_id=worker_id,
+                        concurrency=concurrency,
+                    ),
+                )
+
+        if reload:
+            if os.environ.get(DJANGO_AUTORELOAD_ENV) != "true":
+                logger.info("Starting worker with autoreload enabled.")
+            run_with_reloader(_run)
+        else:
+            _run()
 
     async def ahandle(  # noqa: PLR0913
         self,

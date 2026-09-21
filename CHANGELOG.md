@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added workspace-level Python configuration to streamline local development and testing.
+- Added `--reload` / `--no-reload` flag to `db_async_worker`, mirroring the same option in
+  `db_worker`. When enabled, the worker restarts automatically on code changes using Django's
+  autoreloader. Defaults to `DEBUG`. Incompatible with `--batch` (reload is silently disabled
+  when both are specified).
 
 ## [0.0.1] - 2026-04-30
 
